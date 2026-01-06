@@ -12,6 +12,8 @@ import '../../services/ecg_processor.dart';
 import '../../models/ecg_data.dart';
 import '../../models/session_context.dart';
 import '../../services/session_context_service.dart';
+import '../../services/gemini_service.dart';
+import '../../models/ecg_summary.dart';
 
 class ECGScreen extends StatefulWidget {
   const ECGScreen({super.key});
@@ -69,7 +71,7 @@ class _ECGScreenState extends State<ECGScreen> {
 
   Future<void> _toggleConnection() async {
     if (_isConnected) {
-      _disconnect();
+      await _endSessionAndAnalyze();
     } else {
       // Step 1: Get pre-monitoring context first
       final SessionContext? sessionContext = await context.push(
@@ -439,6 +441,70 @@ class _ECGScreenState extends State<ECGScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _endSessionAndAnalyze() async {
+    // 1. Calculate Summary Metrics
+    final durationSeconds = (_xValue / 860).round(); // 860 Hz sampling rate
+    // Avoid division by zero
+    final double avgHr = durationSeconds > 0
+        ? (_totalRPeaks / durationSeconds) * 60
+        : 0;
+    
+    // Average signal value (simple mean of y values)
+    double totalSignal = 0;
+    for (var spot in _spots) {
+      totalSignal += spot.y;
+    }
+    final double avgSignal = _spots.isNotEmpty ? totalSignal / _spots.length : 0;
+
+    final summary = EcgSummary(
+      averageHeartRate: avgHr,
+      totalRPeaks: _totalRPeaks,
+      durationSeconds: durationSeconds,
+      averageSignalValue: avgSignal,
+    );
+
+    final  contextForAnalysis = _sessionContext;
+
+    // 2. Disconnect
+    _disconnect();
+
+    if (contextForAnalysis == null) return;
+
+    // 3. Show Loading Dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text("Analyzing Heart & Context..."),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // 4. Generate Insights
+    final geminiService = GeminiService();
+    final report = await geminiService.generateConsultation(
+      contextForAnalysis,
+      summary,
+    );
+
+    // 5. Navigate to Insights
+    if (mounted) {
+      Navigator.of(context).pop(); // Close dialog
+      context.push('/insights', extra: report);
+    }
   }
 
   Widget _buildMetric(String label, String value, IconData icon, Color color) {
