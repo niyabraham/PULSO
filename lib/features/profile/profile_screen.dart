@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
+import '../../providers/theme_provider.dart';
 import '../../core/app_strings.dart';
 import '../../services/auth_service.dart';
 
@@ -14,6 +16,33 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   bool _isLoading = true;
   Map<String, dynamic>? _profileData;
+  bool _notificationsEnabled = true;
+
+  void _toggleNotifications(bool value) {
+    setState(() => _notificationsEnabled = value);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(value ? 'Notifications enabled' : 'Notifications disabled'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
+  void _showPlaceholderAction(String title) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: const Text('This feature is coming soon!'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -123,10 +152,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
             const SizedBox(height: 24),
             _buildSectionHeader(AppStrings.appSettingsHeader),
-            _buildSwitchItem(AppStrings.notifications, true),
-            _buildSwitchItem(AppStrings.darkMode, false), // Logic to be implemented
-            _buildActionItem(AppStrings.privacySecurity, Icons.lock_outline),
-            _buildActionItem(AppStrings.helpSupport, Icons.help_outline),
+            _buildSwitchItem(
+              AppStrings.notifications,
+              _notificationsEnabled,
+              _toggleNotifications,
+            ),
+            _buildSwitchItem(
+              AppStrings.darkMode,
+              Provider.of<ThemeProvider>(context).isDarkMode,
+              (val) => Provider.of<ThemeProvider>(context, listen: false).toggleTheme(val),
+            ),
+            _buildActionItem(
+              AppStrings.privacySecurity,
+              Icons.lock_outline,
+              () => _showPlaceholderAction(AppStrings.privacySecurity),
+            ),
+            _buildActionItem(
+              AppStrings.helpSupport,
+              Icons.help_outline,
+              () => _showPlaceholderAction(AppStrings.helpSupport),
+            ),
 
             const SizedBox(height: 32),
             OutlinedButton(
@@ -187,7 +232,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildSwitchItem(String title, bool value) {
+  Widget _buildSwitchItem(String title, bool value, ValueChanged<bool> onChanged) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: SwitchListTile(
@@ -196,13 +241,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
           style: GoogleFonts.inter(fontWeight: FontWeight.w500),
         ),
         value: value,
-        onChanged: (v) {},
+        onChanged: onChanged,
         activeThumbColor: Theme.of(context).colorScheme.primary,
       ),
     );
   }
 
-  Widget _buildActionItem(String title, IconData icon) {
+  Widget _buildActionItem(String title, IconData icon, VoidCallback onTap) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
@@ -212,7 +257,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           style: GoogleFonts.inter(fontWeight: FontWeight.w500),
         ),
         trailing: const Icon(Icons.chevron_right),
-        onTap: () {},
+        onTap: onTap,
       ),
     );
   }
