@@ -3,8 +3,8 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme.dart';
-import '../../models/ecg_data.dart';
 import '../../services/ecg_storage_service.dart';
+import '../../models/ecg_data.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -14,20 +14,44 @@ class HistoryScreen extends StatefulWidget {
 }
 
 class _HistoryScreenState extends State<HistoryScreen> {
-  late Future<List<ECGSession>> _historyFuture;
+  final ECGStorageService _storageService = ECGStorageService();
+  List<ECGSession> _sessions = [];
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _historyFuture = _fetchHistory();
+    _fetchHistory();
   }
 
-  Future<List<ECGSession>> _fetchHistory() async {
+  Future<void> _fetchHistory() async {
     final user = Supabase.instance.client.auth.currentUser;
     if (user != null) {
-      return await ECGStorageService().getRecentSessions(user.id, limit: 20);
+      try {
+        final sessions = await _storageService.getRecentSessions(
+          user.id,
+          limit: 10,
+        );
+        if (mounted) {
+          setState(() {
+            _sessions = sessions;
+            _isLoading = false;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+          });
+        }
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
-    return [];
   }
 
   @override
@@ -38,62 +62,46 @@ class _HistoryScreenState extends State<HistoryScreen> {
           "History",
           style: GoogleFonts.inter(
             fontWeight: FontWeight.bold,
-            color: AppColors.textLight,
+            color: Theme.of(
+              context,
+            ).textTheme.titleLarge?.color, // Consistent theme
           ),
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.filter_list, color: AppColors.textLight),
-            onPressed: () {},
+            icon: Icon(Icons.refresh, color: Theme.of(context).iconTheme.color),
+            onPressed: () {
+              setState(() => _isLoading = true);
+              _fetchHistory();
+            },
           ),
         ],
       ),
-      body: FutureBuilder<List<ECGSession>>(
-        future: _historyFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          if (snapshot.hasError) {
-             return Center(child: Text("Error loading history"));
-          }
-
-          final sessions = snapshot.data ?? [];
-
-          if (sessions.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.history, size: 64, color: Colors.grey[300]),
-                  const SizedBox(height: 16),
-                  Text(
-                    "No history found",
-                    style: GoogleFonts.inter(color: Colors.grey),
-                  ),
-                ],
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _sessions.isEmpty
+          ? Center(
+              child: Text(
+                "No recordings found",
+                style: GoogleFonts.inter(color: Colors.grey),
               ),
-            );
-          }
-
-          return ListView.separated(
-            padding: const EdgeInsets.all(16.0),
-            itemCount: sessions.length,
-            separatorBuilder: (context, index) => const SizedBox(height: 12),
-            itemBuilder: (context, index) {
-              return _buildHistoryItem(context, sessions[index]);
-            },
-          );
-        },
-      ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.all(16.0),
+              itemCount: _sessions.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 12),
+              itemBuilder: (context, index) {
+                return _buildHistoryItem(context, _sessions[index]);
+              },
+            ),
     );
   }
 
   Widget _buildHistoryItem(BuildContext context, ECGSession session) {
-    // For now, we assume Normal unless flagged. 
-    // You can add logic here to check abnormalitiesCount if added to schema later.
-    bool isAbnormal = false; 
+    // Determine status (Mock logic until Analysis Result is linked)
+    bool isAbnormal = false;
+    final hr = session.averageHeartRate ?? 0;
+    if (hr < 60 || hr > 100) isAbnormal = true;
 
     return Card(
       child: ListTile(
@@ -103,16 +111,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
           decoration: BoxDecoration(
             color: isAbnormal
                 ? AppColors.error.withOpacity(0.1)
-                : AppColors.surfaceHighlight.withOpacity(0.2),
+                : AppColors.success.withOpacity(0.1),
             shape: BoxShape.circle,
           ),
           child: Icon(
             Icons.monitor_heart,
-            color: isAbnormal ? AppColors.error : AppColors.primary,
+            color: isAbnormal ? AppColors.error : AppColors.success,
           ),
         ),
         title: Text(
-          isAbnormal ? "Irregular Rhythm" : "ECG Recording",
+          isAbnormal ? "Irregular Rhythm" : "Normal Sinus Rhythm",
           style: GoogleFonts.inter(fontWeight: FontWeight.bold),
         ),
         subtitle: Column(
@@ -123,22 +131,31 @@ class _HistoryScreenState extends State<HistoryScreen> {
               "${_formatDate(session.startTime)} • ${session.durationSeconds}s",
               style: GoogleFonts.inter(fontSize: 12),
             ),
-            Text(
-               "Avg HR: ${session.averageHeartRate?.toStringAsFixed(0) ?? '--'} BPM",
-               style: GoogleFonts.inter(fontSize: 12, color: Colors.grey[600]),
-            ),
+            if (isAbnormal)
+              Padding(
+                padding: const EdgeInsets.only(top: 4.0),
+                child: Text(
+                  "Action Required",
+                  style: GoogleFonts.inter(
+                    color: AppColors.error,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
           ],
         ),
-        trailing: const Icon(Icons.chevron_right, color: AppColors.textLight),
+        trailing: const Icon(Icons.chevron_right),
         onTap: () {
-          // Pass the specific session data or ID to the report screen
-          // context.go('/insights/report', extra: session);
+          // Pass the session ID to insights screen
+          // Use extra or query params
+          context.push('/insights', extra: session.id);
         },
       ),
     );
   }
 
   String _formatDate(DateTime date) {
-    return "${date.day}/${date.month}/${date.year}";
+    return "${date.day}/${date.month} ${date.hour}:${date.minute.toString().padLeft(2, '0')}";
   }
 }

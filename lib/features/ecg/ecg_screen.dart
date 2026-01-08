@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
-import 'dart:math' as math; // Added for min/max calculations
 import 'dart:typed_data';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -18,7 +17,7 @@ import '../../services/ecg_storage_service.dart';
 import '../../models/ecg_data.dart';
 import '../../models/session_context.dart';
 import '../../services/session_context_service.dart';
-import '../../services/gemini_service.dart';
+import '../../services/api_service.dart';
 import '../../models/ecg_summary.dart';
 
 class ECGScreen extends StatefulWidget {
@@ -49,10 +48,8 @@ class _ECGScreenState extends State<ECGScreen> {
 
   // Pan-Tompkins Processor
   late ECGProcessor _ecgProcessor;
-  final List<int> _rPeakXPositions = []; // X-coordinates of R-peaks for visualization
-
-  // Stats Tracking
-  final List<double> _bpmHistory = []; // Track BPMs to calculate min/max later
+  final List<int> _rPeakXPositions =
+      []; // X-coordinates of R-peaks for visualization
 
   // Screenshot & Storage
   final ECGChartCaptureService _captureService = ECGChartCaptureService();
@@ -100,13 +97,6 @@ class _ECGScreenState extends State<ECGScreen> {
       // Store the session context
       setState(() {
         _sessionContext = sessionContext;
-        // Reset stats for new session
-        _bpmHistory.clear(); 
-        _spots.clear();
-        for (int i = 0; i < _maxPoints; i++) {
-          _spots.add(FlSpot(i.toDouble(), 0));
-        }
-        _xValue = _maxPoints.toDouble();
       });
 
       // Step 2: Now proceed to device pairing
@@ -136,7 +126,6 @@ class _ECGScreenState extends State<ECGScreen> {
     // Reset processor for next session
     _ecgProcessor.reset();
     _rPeakXPositions.clear();
-    _bpmHistory.clear();
     _sessionStartTime = DateTime.now();
   }
 
@@ -219,11 +208,6 @@ class _ECGScreenState extends State<ECGScreen> {
 
             // Calculate real-time BPM from processor
             _currentHeartRate = _ecgProcessor.calculateBPM();
-            
-            // Store BPM for session stats if it's a physiological value
-            if (_currentHeartRate > 30 && _currentHeartRate < 250) {
-              _bpmHistory.add(_currentHeartRate);
-            }
           }
 
           _xValue++;
@@ -482,28 +466,12 @@ class _ECGScreenState extends State<ECGScreen> {
   }
 
   Future<void> _endSessionAndAnalyze() async {
-    if (mounted) _showSnackBar("Analyzing session data...");
-
-    // 1. Calculate Real Stats from History
+    // 1. Prepare Summary Data
     final durationSeconds = (_xValue / 860).round();
-    
-    // Accurate calculations using the collected BPM history
-    double avgHr = 0;
-    double maxHr = 0;
-    double minHr = 0;
+    final double avgHr = durationSeconds > 0
+        ? (_totalRPeaks / durationSeconds) * 60
+        : 0;
 
-    if (_bpmHistory.isNotEmpty) {
-      avgHr = _bpmHistory.reduce((a, b) => a + b) / _bpmHistory.length;
-      maxHr = _bpmHistory.reduce(math.max);
-      minHr = _bpmHistory.reduce(math.min);
-    } else if (durationSeconds > 0) {
-      // Fallback if no valid BPM history but we have peaks
-      avgHr = (_totalRPeaks / durationSeconds) * 60;
-      maxHr = avgHr;
-      minHr = avgHr;
-    }
-
-    // Signal Average
     double totalSignal = 0;
     for (var spot in _spots) {
       totalSignal += spot.y;
@@ -512,7 +480,6 @@ class _ECGScreenState extends State<ECGScreen> {
         ? totalSignal / _spots.length
         : 0;
 
-    // 2. Prepare Summary for AI
     final summary = EcgSummary(
       averageHeartRate: avgHr,
       totalRPeaks: _totalRPeaks,
@@ -530,62 +497,73 @@ class _ECGScreenState extends State<ECGScreen> {
     String? report;
 
     try {
-      // 3. Capture Chart Image
+      // 3. Capture Chart Image (Optional)
       final userId = Supabase.instance.client.auth.currentUser?.id;
       if (userId != null) {
-        imageFile = await _captureService.captureChart(
-          userId: userId,
-          sessionId: DateTime.now().millisecondsSinceEpoch.toString(),
-        );
-      }
+        try {
+          imageFile = await _captureService.captureChart(
+            userId: userId,
+            sessionId: DateTime.now().millisecondsSinceEpoch.toString(),
+          );
+        } catch (e) {
+          print("Image capture failed: $e");
+          // Proceed without image
+        }
 
-      // 4. Save Session to DB
-      if (userId != null && imageFile != null) {
+        // 4. Save Session
+        int? readingId;
         final session = ECGSession(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
           userId: userId,
           startTime: _sessionStartTime ?? DateTime.now(),
           endTime: DateTime.now(),
           durationSeconds: durationSeconds,
-          samples: [], // Not storing raw samples to save DB space
+          samples: [], // Store empty to save bandwidth, or implement if needed
           rPeaks: _ecgProcessor.getDetectedRPeaks(),
           averageHeartRate: avgHr,
-          maxHeartRate: maxHr, // Now saving calculated stats
-          minHeartRate: minHr,
           totalRPeaks: _totalRPeaks,
         );
 
-        await _storageService.saveSessionWithImage(
-          session: session,
-          imageFile: imageFile,
-        );
-      }
+        if (imageFile != null) {
+          readingId = await _storageService.saveSessionWithImage(
+            session: session,
+            imageFile: imageFile,
+          );
+        } else {
+          readingId = await _storageService.saveSession(session);
+        }
 
-      // 5. Generate Insights (with Image)
-      final geminiService = GeminiService();
-      report = await geminiService.generateConsultation(
-        contextForAnalysis,
-        summary,
-        chartImage: imageFile,
-      );
+        // 5. Generate Insights (Trigger Backend)
+        if (readingId != null) {
+          print("Session saved with ID: $readingId. Triggering analysis...");
+          try {
+            final apiService = ApiService();
+            await apiService.analyzeSession(readingId.toString());
+            print("Analysis triggered successfully.");
+          } catch (e) {
+            print("Analysis trigger failed: $e");
+            // We continue to Insights screen even if analysis trigger fails,
+            // as the screen handles "loading" or "not ready" states.
+          }
+        } else {
+          print("Failed to save session to Supabase");
+          if (mounted) _showSnackBar("Failed to save session");
+        }
+
+        // 7. Navigate to insights if successful
+        if (mounted && readingId != null) {
+          // Pass the reading ID string as expected by insights_screen.dart
+          context.go('/insights', extra: readingId.toString());
+        }
+      }
     } catch (e) {
       print("Error in analysis flow: $e");
+      if (mounted) _showSnackBar("Error saving session: $e");
     } finally {
       // 6. Cleanup
       _disconnect();
       if (imageFile != null) {
         await _captureService.deleteTemporaryImage(imageFile);
-      }
-
-      // 7. Navigate to Summary Screen
-      if (mounted) {
-        context.go('/ecg/summary', extra: {
-          'avgHr': avgHr,
-          'maxHr': maxHr,
-          'minHr': minHr,
-          'duration': durationSeconds,
-          'report': report,
-        });
       }
     }
   }

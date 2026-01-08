@@ -1,11 +1,10 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme.dart';
-import '../../models/ecg_data.dart'; // Ensure this model exists
 import '../../services/ecg_storage_service.dart';
+import '../../models/ecg_data.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -15,49 +14,49 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  final ECGStorageService _storageService = ECGStorageService();
+  ECGSession? _lastSession;
   bool _isLoading = true;
-  ECGSession? _latestSession;
-  List<ECGSession> _recentSessions = [];
-  double? _calculatedHRV;
+  String _authStatus = "Checking...";
 
   @override
   void initState() {
     super.initState();
-    _loadDashboardData();
+    _fetchDashboardData();
   }
 
-  Future<void> _loadDashboardData() async {
+  Future<void> _fetchDashboardData() async {
     final user = Supabase.instance.client.auth.currentUser;
     if (user != null) {
-      final sessions = await ECGStorageService().getRecentSessions(user.id, limit: 3);
-      
-      setState(() {
-        _recentSessions = sessions;
-        if (sessions.isNotEmpty) {
-          _latestSession = sessions.first;
-          _calculatedHRV = _calculateSDNN(_latestSession!.rPeaks);
+      try {
+        // Fetch only the latest session
+        final sessions = await _storageService.getRecentSessions(
+          user.id,
+          limit: 1,
+        );
+        if (mounted) {
+          setState(() {
+            _lastSession = sessions.isNotEmpty ? sessions.first : null;
+            _isLoading = false;
+            _authStatus = "Ready";
+          });
         }
-        _isLoading = false;
-      });
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _authStatus = "Error loading data";
+          });
+        }
+      }
     } else {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _authStatus = "Not Authenticated";
+        });
+      }
     }
-  }
-
-  // Simple HRV Calculation (SDNN)
-  double? _calculateSDNN(List<RPeak> rPeaks) {
-    if (rPeaks.length < 2) return null;
-    
-    // Extract RR intervals (in ms)
-    // Assuming rrInterval in RPeak is in seconds, convert to ms. 
-    // If it's already in seconds, multiply by 1000.
-    // Based on standard storage, usually seconds.
-    final rrIntervals = rPeaks.map((e) => e.rrInterval * 1000).toList();
-    
-    final meanRR = rrIntervals.reduce((a, b) => a + b) / rrIntervals.length;
-    final variance = rrIntervals.map((rr) => pow(rr - meanRR, 2)).reduce((a, b) => a + b) / (rrIntervals.length - 1);
-    
-    return sqrt(variance);
   }
 
   @override
@@ -89,22 +88,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: _loadDashboardData,
+        onRefresh: _fetchDashboardData,
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(16.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Status Card
+              // Today's Status Card
               _buildStatusCard(),
               const SizedBox(height: 16),
 
-              // Connection Card (Keep static until Bluetooth is implemented)
+              // Live Connection Card
               _buildConnectionCard(context),
               const SizedBox(height: 16),
 
-              // Metrics Strip
+              // Key Metrics Strip
               _buildMetricsStrip(),
               const SizedBox(height: 24),
 
@@ -140,50 +139,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildStatusCard() {
+    // Logic to determine status from last session (mock logic for now if no analysis data in session model)
+    // Ideally, ECGSession should have an 'analysisResult' field, but for now we check basic metrics
+    String status = "No Data";
+    String message = "Start your first recording.";
+    Color color = Colors.grey;
+    IconData icon = Icons.info_outline;
+
     if (_isLoading) {
-       return const Card(
-         child: SizedBox(height: 150, child: Center(child: CircularProgressIndicator())),
-       );
+      status = "Loading...";
+      message = "Fetching latest data...";
+    } else if (_lastSession != null) {
+      // Simple heuristic: if HR is within normal range (60-100)
+      final hr = _lastSession!.averageHeartRate ?? 0;
+      if (hr >= 60 && hr <= 100) {
+        status = "Stable";
+        message = "Your heart rhythm appears normal.";
+        color = AppColors.success; // Assuming green
+        icon = Icons.check_circle_outline;
+      } else {
+        status = "Attention";
+        message = "Heart rate irregularity detected.";
+        color = AppColors.error; // Assuming red/orange
+        icon = Icons.warning_amber_rounded;
+      }
     }
-
-    if (_latestSession == null) {
-      return Card(
-        color: AppColors.surfaceHighlight,
-        child: Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                "No Data Available",
-                style: GoogleFonts.inter(
-                  color: AppColors.primary,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                "Start your first ECG recording to see your heart health status.",
-                style: GoogleFonts.inter(
-                  color: Theme.of(context).colorScheme.primary.withOpacity(0.8),
-                  fontSize: 14,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // Determine status text
-    // Note: A real medical status requires complex analysis. 
-    // We use neutral language here unless we have specific analysis flags.
-    final String statusText = "Analysis Complete"; 
-    final String subText = "Recording successfully saved.";
 
     return Card(
-      color: AppColors.primary,
+      color: _lastSession != null ? color : Colors.grey[800],
       child: Padding(
         padding: const EdgeInsets.all(20.0),
         child: Column(
@@ -201,7 +184,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    "Latest",
+                    status,
                     style: GoogleFonts.inter(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
@@ -209,12 +192,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ),
                 const Spacer(),
-                const Icon(Icons.check_circle_outline, color: Colors.white),
+                Icon(icon, color: Colors.white),
               ],
             ),
             const SizedBox(height: 12),
             Text(
-              statusText,
+              message,
               style: GoogleFonts.inter(
                 color: Colors.white,
                 fontSize: 18,
@@ -223,14 +206,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              subText, // Use dynamic message
-              style: GoogleFonts.inter(
-                color: Colors.white.withOpacity(0.8),
-                fontSize: 12,
-              ),
-            ),
-             Text(
-              "Recorded: ${_formatDate(_latestSession!.startTime)}",
+              _lastSession != null
+                  ? "Last Assessment: ${_formatDate(_lastSession!.startTime)}"
+                  : "Last Assessment: --",
               style: GoogleFonts.inter(
                 color: Colors.white.withOpacity(0.8),
                 fontSize: 12,
@@ -242,6 +220,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  String _formatDate(DateTime date) {
+    // Simple formatter, can use intl package later
+    return "${date.day}/${date.month} ${date.hour}:${date.minute.toString().padLeft(2, '0')}";
+  }
+
   Widget _buildConnectionCard(BuildContext context) {
     return Card(
       child: Padding(
@@ -251,12 +234,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surface,
+                color: AppColors.backgroundLight,
                 shape: BoxShape.circle,
               ),
-              child: Icon(
+              child: const Icon(
                 Icons.bluetooth_searching,
-                color: Theme.of(context).iconTheme.color,
+                color: AppColors.textLight,
               ),
             ),
             const SizedBox(width: 16),
@@ -264,24 +247,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  "Device Pairing",
+                  "Status: $_authStatus", // Debug info for user
                   style: GoogleFonts.inter(
                     fontWeight: FontWeight.bold,
-                    color: Theme.of(context).textTheme.bodyLarge?.color,
+                    color: AppColors.textLight,
                   ),
                 ),
                 Text(
-                  "Connect to capture new data",
+                  "Pair your ECG device",
                   style: GoogleFonts.inter(
                     fontSize: 12,
-                    color: Theme.of(context).textTheme.bodySmall?.color?.withOpacity(0.6),
+                    color: AppColors.textLight.withOpacity(0.6),
                   ),
                 ),
               ],
             ),
             const Spacer(),
             TextButton(
-              onPressed: () {}, // TODO: Open Pairing
+              onPressed: () => context.push('/ecg/pairing'),
               child: Text(
                 "Connect",
                 style: GoogleFonts.inter(fontWeight: FontWeight.w600),
@@ -294,37 +277,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildMetricsStrip() {
-    String hrValue = "--";
-    String hrvValue = "--";
-    String stressValue = "--";
+    // Extract real metrics
+    String bpm = "--";
+    String hrv = "--"; // Not yet calculated in session model
+    String stress = "Low"; // Placeholder until connected to Questionnaire
 
-    if (_latestSession != null) {
-      if (_latestSession!.averageHeartRate != null) {
-        hrValue = "${_latestSession!.averageHeartRate!.toStringAsFixed(0)} bpm";
-      }
-      
-      if (_calculatedHRV != null) {
-        hrvValue = "${_calculatedHRV!.toStringAsFixed(0)} ms";
-        
-        // Very basic stress heuristic for display purposes
-        if (_calculatedHRV! < 50) {
-          stressValue = "Elevated"; 
-        } else {
-          stressValue = "Normal";
-        }
-      }
+    if (_lastSession?.averageHeartRate != null) {
+      bpm = "${_lastSession!.averageHeartRate!.toInt()} bpm";
     }
 
     return Row(
       children: [
-        Expanded(
-          child: _buildMetricItem("Heart Rate", hrValue, Icons.favorite),
-        ),
+        Expanded(child: _buildMetricItem("Heart Rate", bpm, Icons.favorite)),
         const SizedBox(width: 12),
-        Expanded(child: _buildMetricItem("HRV", hrvValue, Icons.graphic_eq)),
+        Expanded(child: _buildMetricItem("HRV", hrv, Icons.graphic_eq)),
         const SizedBox(width: 12),
         Expanded(
-          child: _buildMetricItem("Stress", stressValue, Icons.sentiment_satisfied),
+          child: _buildMetricItem("Stress", stress, Icons.sentiment_satisfied),
         ),
       ],
     );
@@ -334,9 +303,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Theme.of(context).cardTheme.color,
+        color: AppColors.surfaceLight,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Theme.of(context).dividerColor),
+        border: Border.all(color: Colors.grey.withOpacity(0.1)),
       ),
       child: Column(
         children: [
@@ -347,14 +316,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
             style: GoogleFonts.inter(
               fontWeight: FontWeight.bold,
               fontSize: 16,
-              color: Theme.of(context).textTheme.bodyLarge?.color,
+              color: AppColors.textLight,
             ),
           ),
           Text(
             label,
             style: GoogleFonts.inter(
               fontSize: 12,
-              color: Theme.of(context).textTheme.bodySmall?.color?.withOpacity(0.6),
+              color: AppColors.textLight.withOpacity(0.6),
             ),
           ),
         ],
@@ -378,7 +347,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           "Consult AI",
           Icons.auto_awesome,
           AppColors.secondary,
-          () => context.go('/insights'),
+          () => context.go(
+            '/insights',
+            extra: _lastSession?.id,
+          ), // Might need argument
         ),
         const SizedBox(width: 12),
         _buildActionButton(
@@ -428,51 +400,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildRecentInsights() {
-    if (_recentSessions.isEmpty && !_isLoading) {
+    if (_lastSession == null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: Text(
-            "No recent insights available.",
+            "No recent sessions found",
             style: GoogleFonts.inter(color: Colors.grey),
           ),
         ),
       );
     }
 
-    return ListView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: _recentSessions.length,
-      itemBuilder: (context, index) {
-        final session = _recentSessions[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: AppColors.primary.withOpacity(0.1),
-              child: const Icon(Icons.bolt, color: AppColors.primary, size: 20),
-            ),
-            title: Text(
-              "ECG Recording", // Generic title unless analyzed
-              style: GoogleFonts.inter(fontWeight: FontWeight.w600),
-            ),
-            subtitle: Text(
-              _formatDate(session.startTime),
-              style: GoogleFonts.inter(fontSize: 12),
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              // Navigate to details if implemented
-            }, 
-          ),
-        );
-      },
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: AppColors.primary.withOpacity(0.1),
+          child: const Icon(Icons.bolt, color: AppColors.primary, size: 20),
+        ),
+        title: Text(
+          "ECG Session #${_lastSession!.id}",
+          style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          _formatDate(_lastSession!.startTime),
+          style: GoogleFonts.inter(fontSize: 12),
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () {
+          // TODO: Navigate to insights details
+        },
+      ),
     );
-  }
-
-  String _formatDate(DateTime date) {
-    // Simple formatter, you can use intl package for better formatting
-    return "${date.day}/${date.month} • ${date.hour}:${date.minute.toString().padLeft(2, '0')}";
   }
 }
